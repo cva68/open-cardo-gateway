@@ -5,18 +5,30 @@ CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 CONFIG_BT_BLUEDROID_ENABLED=y
 CONFIG_BT_CLASSIC_ENABLED=y
 
-# HFP Hands-Free (headset) role only; the Cardo is the Audio Gateway
+# Both HFP roles: Hands-Free (headset, the Cardo connects to us as a phone would) and
+# Audio Gateway (phone, we connect out to the Cardo's Hands-Free service)
 CONFIG_BT_HFP_ENABLE=y
 CONFIG_BT_HFP_CLIENT_ENABLE=y
-CONFIG_BT_HFP_AG_ENABLE=n
+CONFIG_BT_HFP_AG_ENABLE=y
 
 # One SCO/eSCO link, with audio delivered to the app over HCI rather than the PCM pins
 CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=1
 CONFIG_BTDM_CTRL_BR_EDR_SCO_DATA_PATH_HCI=y
 CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
 
-# Narrowband (CVSD) only for the first tests; wideband (mSBC) comes later
-CONFIG_BT_HFP_WBS_ENABLE=n
+# Raw audio frames are pushed to the app (esp_hf_client_register_audio_data_callback).
+# Espressif recommends this for new designs; the internal codec is slated for removal.
+CONFIG_BT_HFP_USE_EXTERNAL_CODEC=y
+
+# Wideband speech (mSBC, 16 kHz) with codec negotiation. With the external codec the
+# frames reach audio.c still encoded.
+CONFIG_BT_HFP_WBS_ENABLE=y
+
+# Keep a ring buffer of HCI traffic that the `hcilog` console command dumps,
+# for conversion to btsnoop with tools/hcilog_to_btsnoop.py
+CONFIG_BT_HCI_LOG_DEBUG_EN=y
+CONFIG_BT_HCI_LOG_DATA_BUFFER_SIZE=16
+CONFIG_BT_HCI_LOG_ADV_BUFFER_SIZE=1
 
 # Bluedroid needs more than the default 1MB app partition.
 # PlatformIO uses board_build.partitions in platformio.ini; keep them in sync.
