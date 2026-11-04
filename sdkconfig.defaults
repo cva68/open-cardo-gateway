@@ -1,0 +1,23 @@
+# Bluetooth: Classic only, Bluedroid host
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLE_ENABLED=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+
+# HFP Hands-Free (headset) role only; the Cardo is the Audio Gateway
+CONFIG_BT_HFP_ENABLE=y
+CONFIG_BT_HFP_CLIENT_ENABLE=y
+CONFIG_BT_HFP_AG_ENABLE=n
+
+# One SCO/eSCO link, with audio delivered to the app over HCI rather than the PCM pins
+CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=1
+CONFIG_BTDM_CTRL_BR_EDR_SCO_DATA_PATH_HCI=y
+CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
+
+# Narrowband (CVSD) only for the first tests; wideband (mSBC) comes later
+CONFIG_BT_HFP_WBS_ENABLE=n
+
+# Bluedroid needs more than the default 1MB app partition.
+# PlatformIO uses board_build.partitions in platformio.ini; keep them in sync.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
