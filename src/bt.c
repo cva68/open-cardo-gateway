@@ -231,6 +231,9 @@ void bt_init(const char *device_name)
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT));
+    // Full power (+9 dBm, default range 0 to +3 dBm): the Freecom 2x's EV5 audio link has no
+    // retransmissions, so every packet it misses is a gap in the audio
+    ESP_ERROR_CHECK(esp_bredr_tx_power_set(ESP_PWR_LVL_P9, ESP_PWR_LVL_P9));
 
     esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bluedroid_init_with_cfg(&bluedroid_cfg));

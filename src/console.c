@@ -32,7 +32,7 @@ static int cmd_status(int argc, char **argv)
 {
     ag_print_status();
     hf_print_status();
-    printf("TX:             %s\n", audio_tx_mode_name(audio_get_tx_mode()));
+    printf("TX:             %s, lead %u frames\n", audio_tx_mode_name(audio_get_tx_mode()), audio_get_tx_lead());
     printf("Stats log:      %s\n", audio_get_stats_logging() ? "on" : "off");
     printf("Free heap:      %" PRIu32 " bytes (lowest %" PRIu32 ")\n",
            esp_get_free_heap_size(), esp_get_minimum_free_heap_size());
@@ -48,11 +48,22 @@ static int cmd_tx(int argc, char **argv)
         audio_set_tx_mode(AUDIO_TX_TONE);
     } else if (argc == 2 && strcmp(argv[1], "loop") == 0) {
         audio_set_tx_mode(AUDIO_TX_LOOPBACK);
+    } else if (argc == 2 && strcmp(argv[1], "off") == 0) {
+        audio_set_tx_mode(AUDIO_TX_OFF);
+    } else if (argc == 3 && strcmp(argv[1], "lead") == 0) {
+        char *end;
+        unsigned long frames = strtoul(argv[2], &end, 0);
+        if (*end != '\0' || frames > 8) {
+            return usage("tx lead <0-8>");
+        }
+        audio_set_tx_lead((uint8_t)frames);
+        printf("Lead: %lu frames from the next audio connection\n", frames);
+        return 0;
     } else {
-        return usage("tx silence|tone|loop");
+        return usage("tx silence|tone|loop|off|lead <0-8>");
     }
     printf("Sending %s\n", audio_tx_mode_name(audio_get_tx_mode()));
-    if (audio_get_tx_mode() != AUDIO_TX_LOOPBACK) {
+    if (audio_get_tx_mode() != AUDIO_TX_LOOPBACK && audio_get_tx_mode() != AUDIO_TX_OFF) {
         printf("Note: on mSBC (wideband) links only loopback can be sent for now; this mode sends nothing\n");
     }
     return 0;
@@ -75,7 +86,8 @@ static int cmd_stats(int argc, char **argv)
 static int cmd_ag(int argc, char **argv)
 {
     const char *usage_text = "ag connect <aa:bb:cc:dd:ee:ff> | disconnect | audio on|off | call on|off | pkt | "
-                             "obisf <n>|error | esco <pkt types hex> <max latency> <retrans> [msbc]|default";
+                             "obisf <n>|error | esco <pkt types hex> <max latency> <retrans> [msbc|<voice setting hex>]|default | "
+                             "codec cvsd|msbc";
     esp_bd_addr_t bda;
     if (argc == 3 && strcmp(argv[1], "connect") == 0 && bda_from_str(argv[2], bda)) {
         ag_connect(bda);
@@ -91,17 +103,25 @@ static int cmd_ag(int argc, char **argv)
         ag_call(false);
     } else if (argc == 2 && strcmp(argv[1], "pkt") == 0) {
         ag_request_pkt_stats();
+    } else if (argc == 3 && strcmp(argv[1], "codec") == 0 &&
+               (strcmp(argv[2], "cvsd") == 0 || strcmp(argv[2], "msbc") == 0)) {
+        ag_set_codec(strcmp(argv[2], "msbc") == 0);
     } else if (argc == 3 && strcmp(argv[1], "esco") == 0 && strcmp(argv[2], "default") == 0) {
         ag_reset_esco_params();
-    } else if ((argc == 5 || (argc == 6 && strcmp(argv[5], "msbc") == 0)) && strcmp(argv[1], "esco") == 0) {
-        char *end1, *end2, *end3;
+    } else if ((argc == 5 || argc == 6) && strcmp(argv[1], "esco") == 0) {
+        char *end1, *end2, *end3, *end4 = "";
         unsigned long types = strtoul(argv[2], &end1, 16);
         unsigned long latency = strtoul(argv[3], &end2, 0);
         unsigned long retrans = strtoul(argv[4], &end3, 0);
-        if (*end1 != '\0' || *end2 != '\0' || *end3 != '\0' || types > 0xffff || latency > 0xffff || retrans > 0xff) {
+        unsigned long voice = AG_VOICE_SETTING_CVSD;
+        if (argc == 6) {
+            voice = strcmp(argv[5], "msbc") == 0 ? AG_VOICE_SETTING_TRANS : strtoul(argv[5], &end4, 16);
+        }
+        if (*end1 != '\0' || *end2 != '\0' || *end3 != '\0' || *end4 != '\0' || types > 0xffff ||
+            latency > 0xffff || retrans > 0xff || voice > 0x3ff) {
             return usage(usage_text);
         }
-        ag_set_esco_params(types, latency, retrans, argc == 6);
+        ag_set_esco_params(types, latency, retrans, voice);
     } else if (argc == 3 && strcmp(argv[1], "obisf") == 0 && strcmp(argv[2], "error") == 0) {
         ag_set_obisf_reply(-1);
     } else if (argc == 3 && strcmp(argv[1], "obisf") == 0) {
@@ -232,11 +252,12 @@ static int cmd_hcilog(int argc, char **argv)
 /** The console commands, in the order `help` lists them. */
 static const esp_console_cmd_t COMMANDS[] = {
     {.command = "status", .help = "Show both roles, the audio settings and free memory", .func = cmd_status},
-    {.command = "tx", .help = "Choose what to send: silence, 1 kHz tone, or loopback of received audio",
-     .hint = "silence|tone|loop", .func = cmd_tx},
+    {.command = "tx", .help = "Choose what to send: silence, 1 kHz tone, loopback of received audio, or nothing",
+     .hint = "silence|tone|loop|off|lead <0-8>", .func = cmd_tx},
     {.command = "stats", .help = "Turn the per-second audio log on or off", .hint = "on|off", .func = cmd_stats},
-    {.command = "ag", .help = "Audio Gateway (phone) role: connect out to a headset, open audio, fake a call, tune (e)SCO",
-     .hint = "connect <addr>|disconnect|audio on|off|call on|off|pkt|obisf <n>|error|esco <types> <lat> <re> [msbc]|default",
+    {.command = "ag", .help = "Audio Gateway (phone) role: connect out to a headset, open audio, fake a call, tune (e)SCO, pick the codec",
+     .hint = "connect <addr>|disconnect|audio on|off|call on|off|pkt|obisf <n>|error|esco <types> <lat> <re> [msbc|<voice>]|default"
+             "|codec cvsd|msbc",
      .func = cmd_ag},
     {.command = "hf", .help = "Hands-Free (headset) role: connect to a phone-like AG (default: the last peer), open audio",
      .hint = "connect [addr]|disconnect|audio on|off|pkt", .func = cmd_hf},

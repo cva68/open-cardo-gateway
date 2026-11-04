@@ -38,9 +38,37 @@ typedef struct {
  */
 extern void bta_ag_set_esco_param(bool set_reset, bta_esco_params_t *param);
 
+/**
+ * @brief Bluedroid internal (bta_ag_api.c), not exposed by ESP-IDF: set the codec we ask
+ *        for with +BCS when we next open audio. ESP-IDF sets mSBC itself after each AT+BAC.
+ */
+extern void BTA_AgSetCodec(uint16_t handle, uint16_t codec);
+
+#define BTA_AG_HANDLE        1       ///< BTA handle of our only AG service control block (BTA_AG_NUM_SCB is 1)
+#define SCO_CODEC_CVSD       1       ///< BTM_SCO_CODEC_CVSD
+#define SCO_CODEC_MSBC       2       ///< BTM_SCO_CODEC_MSBC
+
 #define ESCO_BANDWIDTH_64K   8000    ///< 64 kbit/s, in bytes/s
-#define VOICE_SETTING_CVSD   0x0060  ///< Linear 16-bit 2's complement input, CVSD air coding
-#define VOICE_SETTING_TRANS  0x0063  ///< As above, transparent air coding (mSBC)
+
+/**
+ * (e)SCO request for CVSD: all packet types, latency and retransmission left to the headset.
+ * The Freecom 2x answers with its EV5 intercom link (Tesco 36 slots, 180-byte packets, no
+ * retransmission), which unlike the HFP links leaves room for the rider's music from a phone.
+ * Samples over HCI are 8-bit u-law: with 16-bit PCM an EV5 packet is 360 bytes, more than the
+ * ESP32 controller carries (it keeps 360 mod 256 = 104). See CLAUDE.md.
+ */
+#define CVSD_ESCO_PACKET_TYPES  0x003f
+#define CVSD_ESCO_MAX_LATENCY   0xffff
+#define CVSD_ESCO_RETRANS       0xff
+#define CVSD_VOICE_SETTING      AG_VOICE_SETTING_ULAW
+
+#define VOICE_INPUT_CODING_MASK  0x0300  ///< Voice setting: input coding (linear, u-law, A-law)
+#define VOICE_INPUT_LINEAR       0x0000
+#define VOICE_INPUT_ULAW         0x0100
+#define VOICE_INPUT_16BIT        0x0020  ///< Voice setting: 16-bit (rather than 8-bit) linear input
+
+static bool s_esco_override;                             ///< Whether we override Bluedroid's (e)SCO request
+static uint16_t s_voice_setting = AG_VOICE_SETTING_CVSD; ///< Voice setting of our override
 
 /**
  * Our answer to AT+OBISF (OBI supported features, sent by the Cardo right after the
@@ -101,6 +129,51 @@ static void log_hf_features(uint32_t feat)
     ESP_LOGI(TAG, "HF features 0x%03" PRIx32 ":%s", feat, names);
 }
 
+/** @brief Override the (e)SCO request (see ag_set_esco_params()), without printing. */
+static void set_esco(uint16_t packet_types, uint16_t max_latency, uint8_t retrans_effort, uint16_t voice_setting)
+{
+    bta_esco_params_t params = {
+        .tx_bw = ESCO_BANDWIDTH_64K,
+        .rx_bw = ESCO_BANDWIDTH_64K,
+        .max_latency = max_latency,
+        .voice_contfmt = voice_setting,
+        .packet_types = packet_types,
+        .retrans_effort = retrans_effort,
+    };
+    bta_ag_set_esco_param(true, &params);
+    s_esco_override = true;
+    s_voice_setting = voice_setting;
+}
+
+/** @brief Go back to Bluedroid's (e)SCO request, without printing. */
+static void reset_esco(void)
+{
+    bta_ag_set_esco_param(false, NULL);
+    s_esco_override = false;
+}
+
+/** @brief Choose the codec and link for the next audio connection (see ag_set_codec()). */
+static void select_link(bool msbc)
+{
+    BTA_AgSetCodec(BTA_AG_HANDLE, msbc ? SCO_CODEC_MSBC : SCO_CODEC_CVSD);
+    if (msbc) {
+        reset_esco();
+    } else {
+        set_esco(CVSD_ESCO_PACKET_TYPES, CVSD_ESCO_MAX_LATENCY, CVSD_ESCO_RETRANS, CVSD_VOICE_SETTING);
+    }
+}
+
+/** @brief Frame format of a CVSD link, from the voice setting we asked for. */
+static audio_format_t cvsd_format(void)
+{
+    uint16_t voice = s_esco_override ? s_voice_setting : AG_VOICE_SETTING_CVSD;
+    switch (voice & VOICE_INPUT_CODING_MASK) {
+    case VOICE_INPUT_LINEAR: return (voice & VOICE_INPUT_16BIT) ? AUDIO_FMT_PCM16 : AUDIO_FMT_PCM8;
+    case VOICE_INPUT_ULAW:   return AUDIO_FMT_ULAW;
+    default:                 return AUDIO_FMT_OTHER;
+    }
+}
+
 /** @brief Send all our indicator values (+CIEV) to the headset. */
 static void report_indicators(esp_bd_addr_t bda)
 {
@@ -134,6 +207,9 @@ static void ag_event_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             log_hf_features(param->conn_stat.peer_feat);
             memcpy(s_peer, param->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
             s_have_peer = true;
+            // After AT+BAC, for which ESP-IDF has chosen mSBC
+            select_link(false);
+            ESP_LOGI(TAG, "Audio link: CVSD, u-law samples, the headset's choice of (e)SCO link");
         } else if (state == ESP_HF_CONNECTION_STATE_DISCONNECTED) {
             s_call_active = false;
         }
@@ -148,7 +224,7 @@ static void ag_event_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             s_sync_hdl = param->audio_stat.sync_conn_handle;
             ESP_LOGI(TAG, "(e)SCO handle 0x%04x, preferred frame size %u bytes",
                      s_sync_hdl, param->audio_stat.preferred_frame_size);
-            audio_start(state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC);
+            audio_start(state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC ? AUDIO_FMT_MSBC : cvsd_format());
         } else if (state == ESP_HF_AUDIO_STATE_DISCONNECTED) {
             audio_stop();
             s_sync_hdl = 0;
@@ -327,25 +403,28 @@ void ag_call(bool active)
     }
 }
 
-void ag_set_esco_params(uint16_t packet_types, uint16_t max_latency, uint8_t retrans_effort, bool msbc)
+void ag_set_esco_params(uint16_t packet_types, uint16_t max_latency, uint8_t retrans_effort, uint16_t voice_setting)
 {
-    bta_esco_params_t params = {
-        .tx_bw = ESCO_BANDWIDTH_64K,
-        .rx_bw = ESCO_BANDWIDTH_64K,
-        .max_latency = max_latency,
-        .voice_contfmt = msbc ? VOICE_SETTING_TRANS : VOICE_SETTING_CVSD,
-        .packet_types = packet_types,
-        .retrans_effort = retrans_effort,
-    };
-    bta_ag_set_esco_param(true, &params);
-    printf("(e)SCO: %s, packet types 0x%04x, max latency %u ms, retransmission %u\n",
-           msbc ? "mSBC" : "CVSD", packet_types, max_latency, retrans_effort);
+    set_esco(packet_types, max_latency, retrans_effort, voice_setting);
+    printf("(e)SCO: voice setting 0x%04x, packet types 0x%04x, max latency %u ms, retransmission %u\n",
+           voice_setting, packet_types, max_latency, retrans_effort);
 }
 
 void ag_reset_esco_params(void)
 {
-    bta_ag_set_esco_param(false, NULL);
+    reset_esco();
     printf("(e)SCO: Bluedroid defaults\n");
+}
+
+void ag_set_codec(bool msbc)
+{
+    if (s_conn_state != ESP_HF_CONNECTION_STATE_SLC_CONNECTED) {
+        printf("No AG service level connection\n");
+        return;
+    }
+    select_link(msbc);
+    printf("Next audio connection: %s\n", msbc ? "mSBC, Bluedroid's (e)SCO request"
+                                               : "CVSD, u-law samples, the headset's choice of (e)SCO link");
 }
 
 void ag_set_obisf_reply(int value)
@@ -369,6 +448,12 @@ void ag_print_status(void)
     printf("AG peer:        %s\n", s_have_peer ? bda_to_str(s_peer, bda_str) : "none");
     printf("AG audio:       %s\n", ENUM_NAME(AUDIO_STATE_NAMES, s_audio_state));
     printf("AG call:        %s\n", s_call_active ? "active" : "none");
+    if (s_esco_override) {
+        printf("AG (e)SCO:      override, voice setting 0x%04x (%s)\n", s_voice_setting,
+               audio_format_name(cvsd_format()));
+    } else {
+        printf("AG (e)SCO:      Bluedroid defaults\n");
+    }
     if (s_obisf_reply >= 0) {
         printf("AG OBISF reply: +OBISF: %d\n", s_obisf_reply);
     } else {

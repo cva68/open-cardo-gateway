@@ -1,0 +1,36 @@
+Bluedroid AG: size CVSD audio packets by the voice setting's sample size, not always 16 bits.
+
+Needed for the Freecom 2x's EV5 CVSD link (180-byte eSCO packets, 22.5 ms). With the default
+16-bit linear PCM over HCI, each packet is 360 bytes, more than the 8-bit HCI SCO length field
+allows. The ESP32 controller (closed source) keeps only 360 mod 256 = 104 bytes per packet in
+both directions, so the link has to use 8-bit samples (u-law, set with `ag esco`, voice
+setting 0x0100), which makes each packet 180 bytes. Bluedroid assumed 2 bytes per sample for
+CVSD, so it cut the app's audio into 360-byte packets, which BTM_WriteScoData() truncated.
+
+CMakeLists.txt also raises BTM_SCO_DATA_SIZE_MAX (largest HCI SCO packet Bluedroid sends) from
+120 to 240 for the 180-byte packets.
+
+Applied to ~/.platformio/packages/framework-espidf by tools/apply_patches.py before each build.
+
+diff --git a/components/bt/host/bluedroid/bta/hf_ag/bta_ag_sco.c b/components/bt/host/bluedroid/bta/hf_ag/bta_ag_sco.c
+index e58f462..8d1d9d7 100644
+--- a/components/bt/host/bluedroid/bta/hf_ag/bta_ag_sco.c
++++ b/components/bt/host/bluedroid/bta/hf_ag/bta_ag_sco.c
+@@ -210,8 +210,15 @@ static void bta_ag_sco_conn_cback(UINT16 sco_idx)
+ 
+         if (sco_data.air_mode == BTM_SCO_AIR_MODE_CVSD)
+         {
+-            p_scb->out_pkt_len = sco_data.tx_pkt_len * 2;
+-            p_scb->in_pkt_len = sco_data.rx_pkt_len * 2;
++            /* open-intercom: bytes per sample over HCI follow the voice setting the link was set
++               up with (bta_ag_create_sco and bta_ag_sco_conn_rsp use the same params): 2 for
++               16-bit linear PCM, 1 for 8-bit linear, u-law or A-law. Was always 2. */
++            UINT16 voice = bta_ag_cb.sco.param_updated ? bta_ag_cb.sco.params.voice_contfmt
++                                                       : BTM_VOICE_SETTING_CVSD;
++            UINT16 bytes_per_sample = ((voice & HCI_INP_CODING_MASK) == HCI_INP_CODING_LINEAR &&
++                                       (voice & HCI_INP_SAMPLE_SIZE_MASK) == HCI_INP_SAMPLE_SIZE_16BIT) ? 2 : 1;
++            p_scb->out_pkt_len = sco_data.tx_pkt_len * bytes_per_sample;
++            p_scb->in_pkt_len = sco_data.rx_pkt_len * bytes_per_sample;
+         }
+         else {
+             p_scb->out_pkt_len = sco_data.tx_pkt_len;

@@ -185,7 +185,7 @@ static void hf_event_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_t
             s_sync_hdl = param->audio_stat.sync_conn_handle;
             ESP_LOGI(TAG, "(e)SCO handle 0x%04x, preferred frame size %u bytes",
                      s_sync_hdl, param->audio_stat.preferred_frame_size);
-            audio_start(state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+            audio_start(state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC ? AUDIO_FMT_MSBC : AUDIO_FMT_PCM16);
         } else if (state == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED) {
             audio_stop();
             s_sync_hdl = 0;
